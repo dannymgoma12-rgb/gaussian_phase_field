@@ -37,7 +37,7 @@ material:
   center: [0.5, 0.5, 0.5]
   size: [0.8, 0.8, 0.8]
   density: 1200.0
-  youngs_modulus: 5.0e6
+  youngs_modulus: 1.0e7
   poissons_ratio: 0.25
   Gc: 120000.0
   l0: 0.025
