@@ -99,6 +99,8 @@ damage_projection:
 
 gaussian_splatting:
   sh_degree: 3
+  pretrained_ply: null              # Path to pre-trained 3DGS .ply (null = procedural gray)
+  pretrained_scale_multiplier: 1.0  # Manual splat size adjustment
   crack_color: [0.6, 0.08, 0.08]
   opacity_mode: "smooth"
   color_mode: "overlay"

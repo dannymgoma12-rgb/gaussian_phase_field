@@ -395,14 +395,38 @@ def setup_gaussians(config: OmegaConf, surface_pcd, device: torch.device):
     print(f"  - FoV: {np.degrees(fov_x):.1f}° x {np.degrees(fov_y):.1f}°")
 
     gaussians = GaussianModel(sh_degree=config.gaussian_splatting.sh_degree)
-    gaussians.create_from_pcd(
-        surface_pcd,
-        cam_infos=[],
-        spatial_lr_scale=1.0,
-        camera_distance=cam_distance,
-        image_width=img_width,
-        fov_x=fov_x
-    )
+
+    pretrained_ply = config.gaussian_splatting.get("pretrained_ply", None)
+
+    if pretrained_ply is not None:
+        # Pre-trained 3DGS .ply → photorealistic appearance
+        from src.preprocessing.ply_loader import PretrainedPlyLoader
+
+        scale_mult = config.gaussian_splatting.get("pretrained_scale_multiplier", 1.0)
+        loader = PretrainedPlyLoader(
+            ply_path=pretrained_ply,
+            sh_degree=config.gaussian_splatting.sh_degree,
+        )
+        ply_data = loader.load_raw_ply()
+        ply_xyz_norm, scale_factor = loader.normalize_positions(ply_data['xyz'])
+        match_indices, distances = loader.match_to_surface_particles(
+            ply_xyz_norm, np.asarray(surface_pcd.points)
+        )
+        loader.create_matched_gaussians(
+            gaussians, surface_pcd, ply_data, match_indices,
+            scale_factor, scale_multiplier=scale_mult
+        )
+        print(f"  - Loaded pretrained PLY: {pretrained_ply}")
+    else:
+        # Procedural gray splats from mesh
+        gaussians.create_from_pcd(
+            surface_pcd,
+            cam_infos=[],
+            spatial_lr_scale=1.0,
+            camera_distance=cam_distance,
+            image_width=img_width,
+            fov_x=fov_x
+        )
 
     # Move to device
     gaussians._xyz = gaussians._xyz.to(device)
@@ -411,6 +435,12 @@ def setup_gaussians(config: OmegaConf, surface_pcd, device: torch.device):
     gaussians._opacity = gaussians._opacity.to(device)
     gaussians._scaling = gaussians._scaling.to(device)
     gaussians._rotation = gaussians._rotation.to(device)
+
+    # Ensure _normal exists (load_ply/pretrained path may not set it)
+    if not hasattr(gaussians, '_normal') or gaussians._normal is None:
+        gaussians._normal = torch.zeros(
+            (gaussians._xyz.shape[0], 3), device=device
+        )
 
     print(f"  - Surface Gaussians: {gaussians._xyz.shape[0]}")
     print(f"  - SH degree: {config.gaussian_splatting.sh_degree}")
@@ -1256,6 +1286,13 @@ def main():
             z_current_center = (simulator.x_mpm[:, 2].min().item() + simulator.x_mpm[:, 2].max().item()) / 2
             z_shift = drop_center_z - z_current_center
             simulator.x_mpm[:, 2] += z_shift
+
+            # Adjust Gaussian splat scales for the object shrinkage
+            if config.gaussian_splatting.get("pretrained_ply", None) is not None:
+                import math as _math
+                simulator.gaussians._scaling.data += _math.log(drop_scale)
+                print(f"  - Pretrained splat scales adjusted by log({drop_scale})="
+                      f"{_math.log(drop_scale):.4f}")
 
             z_min = simulator.x_mpm[:, 2].min().item()
             z_max = simulator.x_mpm[:, 2].max().item()
