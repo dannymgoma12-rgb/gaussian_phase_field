@@ -1025,55 +1025,6 @@ class HybridCrackSimulator:
                 self.x_mpm, self.v_mpm, self.C, self.F = self.mpm.p2g2p_subset(
                     self.x_mpm, self.v_mpm, self.C, self.F, stress, frag_idx)
 
-            # ---- Rigid Body Velocity Projection ----
-            # Project each fragment's velocity onto rigid-body kinematics
-            # (COM translation + rotation) to eliminate internal elastic wobble
-            rigid_alpha = 0.8
-            p_mass = self.mpm.p_mass
-            for frag_idx in self.fragment_manager.fragment_particle_indices:
-                if len(frag_idx) < self.fragment_manager.min_fragment_particles:
-                    continue
-                x_frag = self.x_mpm[frag_idx]
-                v_frag = self.v_mpm[frag_idx]
-
-                # COM position and velocity
-                com = x_frag.mean(dim=0)
-                v_com = v_frag.mean(dim=0)
-
-                # Relative positions and velocities
-                r = x_frag - com.unsqueeze(0)
-                v_rel = v_frag - v_com.unsqueeze(0)
-
-                # Angular momentum: L = Σ m (r_i × v_rel_i)
-                L = torch.cross(r, v_rel, dim=1).sum(dim=0) * p_mass
-
-                # Inertia tensor: I_jk = Σ m (|r|² δ_jk - r_j r_k)
-                r_sq = (r * r).sum(dim=1)
-                I_tensor = torch.zeros(3, 3, device=r.device)
-                I_tensor[0, 0] = (r_sq - r[:, 0] ** 2).sum()
-                I_tensor[1, 1] = (r_sq - r[:, 1] ** 2).sum()
-                I_tensor[2, 2] = (r_sq - r[:, 2] ** 2).sum()
-                I_tensor[0, 1] = I_tensor[1, 0] = -(r[:, 0] * r[:, 1]).sum()
-                I_tensor[0, 2] = I_tensor[2, 0] = -(r[:, 0] * r[:, 2]).sum()
-                I_tensor[1, 2] = I_tensor[2, 1] = -(r[:, 1] * r[:, 2]).sum()
-                I_tensor *= p_mass
-
-                # Angular velocity: ω = I⁻¹ L
-                try:
-                    omega = torch.linalg.solve(I_tensor, L)
-                except Exception:
-                    omega = torch.zeros(3, device=r.device)
-
-                # Rigid-body velocity: v_rigid = v_com + ω × r
-                omega_exp = omega.unsqueeze(0).expand_as(r)
-                v_rigid = v_com.unsqueeze(0) + torch.cross(omega_exp, r, dim=1)
-
-                # Blend: α * rigid + (1-α) * MPM
-                self.v_mpm[frag_idx] = rigid_alpha * v_rigid + (1.0 - rigid_alpha) * v_frag
-
-                # Zero out C (velocity gradient) — rigid body has no internal deformation
-                self.C[frag_idx] = 0.0
-
             self.mpm.time += dt
         else:
             self.x_mpm, self.v_mpm, self.C, self.F = self.mpm.p2g2p(
@@ -1197,7 +1148,7 @@ class HybridCrackSimulator:
               f"(direction from physics -∇H)")
 
         # Post-impact adjustments
-        post_g = -300.0
+        post_g = -400.0
         g_vec = self.mpm.gravity.clone()
         g_vec[:] = 0.0
         g_vec[2] = post_g
@@ -1244,6 +1195,38 @@ class HybridCrackSimulator:
                 else:
                     self.step_physics(dt_current)
 
+            # ---- Rigid Body Velocity Projection (once per frame) ----
+            # Suppress internal elastic wobble while preserving ballistic motion
+            if self.fragmentation_active and self.fragment_manager.n_fragments > 1:
+                rigid_alpha = 0.5
+                p_mass = self.mpm.p_mass
+                for frag_idx in self.fragment_manager.fragment_particle_indices:
+                    if len(frag_idx) < self.fragment_manager.min_fragment_particles:
+                        continue
+                    x_frag = self.x_mpm[frag_idx]
+                    v_frag = self.v_mpm[frag_idx]
+                    com = x_frag.mean(dim=0)
+                    v_com = v_frag.mean(dim=0)
+                    r = x_frag - com.unsqueeze(0)
+                    v_rel = v_frag - v_com.unsqueeze(0)
+                    L = torch.cross(r, v_rel, dim=1).sum(dim=0) * p_mass
+                    r_sq = (r * r).sum(dim=1)
+                    I_tensor = torch.zeros(3, 3, device=r.device)
+                    I_tensor[0, 0] = (r_sq - r[:, 0] ** 2).sum()
+                    I_tensor[1, 1] = (r_sq - r[:, 1] ** 2).sum()
+                    I_tensor[2, 2] = (r_sq - r[:, 2] ** 2).sum()
+                    I_tensor[0, 1] = I_tensor[1, 0] = -(r[:, 0] * r[:, 1]).sum()
+                    I_tensor[0, 2] = I_tensor[2, 0] = -(r[:, 0] * r[:, 2]).sum()
+                    I_tensor[1, 2] = I_tensor[2, 1] = -(r[:, 1] * r[:, 2]).sum()
+                    I_tensor *= p_mass
+                    try:
+                        omega = torch.linalg.solve(I_tensor, L)
+                    except Exception:
+                        omega = torch.zeros(3, device=r.device)
+                    omega_exp = omega.unsqueeze(0).expand_as(r)
+                    v_rigid = v_com.unsqueeze(0) + torch.cross(omega_exp, r, dim=1)
+                    self.v_mpm[frag_idx] = rigid_alpha * v_rigid + (1.0 - rigid_alpha) * v_frag
+
             # Burst mode at impact for near-instantaneous brittle fracture
             if (self._gravity_drop and self._gravity_drop_contacted and
                     hasattr(self, '_impact_frame_count')):
@@ -1276,9 +1259,11 @@ class HybridCrackSimulator:
                 and hasattr(self, 'crack_paths') and len(self.crack_paths) > 0):
             n_frags = self._detect_fragments_from_crack_planes()
             if n_frags > 1:
+                first_detection = not self.fragmentation_active
                 self.fragmentation_active = True
 
-                if hasattr(self, '_impact_center'):
+                # Only apply separation impulse on FIRST detection (avoid repeated flinch)
+                if first_detection and hasattr(self, '_impact_center'):
                     ic = self._impact_center.unsqueeze(0)  # [1, 3]
                     total_particles = sum(len(fi) for fi in self.fragment_manager.fragment_particle_indices)
                     for frag_idx in self.fragment_manager.fragment_particle_indices:
