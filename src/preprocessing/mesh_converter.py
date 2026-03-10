@@ -54,6 +54,8 @@ class MeshToPointCloudConverter:
         self.use_poisson = use_poisson
         self.poisson_depth = poisson_depth
         self.normalize = normalize_to_unit_cube
+        self._original_center = None
+        self._original_scale = None
 
         print(f"[MeshConverter] Initialized")
         print(f"  - Mesh: {self.mesh_path.name}")
@@ -93,6 +95,10 @@ class MeshToPointCloudConverter:
             # Normalize and fit to 95% of unit cube (avoid boundaries)
             vertices = (vertices - center) / scale * 0.95 + 0.5
             mesh.vertices = o3d.utility.Vector3dVector(vertices)
+
+            # Store normalization metadata for PLY alignment
+            self._original_center = center
+            self._original_scale = scale
 
             print(f"  - Normalized to [0, 1]³ (95% fill)")
             print(f"  - Original center: {center}")

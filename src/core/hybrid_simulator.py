@@ -135,7 +135,21 @@ class HybridCrackSimulator:
 
         x_surf_mpm = self.x_mpm[self.surface_mask]
         x_surf_world = self.mapper.mpm_to_world(x_surf_mpm)
-        self.gaussians._xyz.data = x_surf_world
+
+        # Direct PLY mode: track displacement relative to surface particles
+        self._ply_direct = getattr(self.gaussians, '_ply_direct_mode', False)
+        if self._ply_direct:
+            ply_to_surf = self.gaussians._ply_to_surface  # (K,) numpy
+            self._ply_to_surface = torch.from_numpy(ply_to_surf).long().to(device)
+            self._ply_init_xyz = self.gaussians._xyz.data.clone()
+            self._surf_init_world = x_surf_world.clone()
+            # Apply initial alignment: shift PLY Gaussians to match surface positions
+            surf_pos_for_ply = x_surf_world[self._ply_to_surface]
+            offset = surf_pos_for_ply - self._ply_init_xyz
+            # Keep PLY positions (they're already well-placed), just store reference
+            print(f"  - Direct PLY mode: {self._ply_init_xyz.shape[0]} Gaussians")
+        else:
+            self.gaussians._xyz.data = x_surf_world
 
         self.frame_count = 0
         self.last_render_time = time.time()
@@ -1289,6 +1303,19 @@ class HybridCrackSimulator:
             self.c_vol, self.x_mpm, x_surf_mpm, self.surface_mask)
         x_surf_world = self.mapper.mpm_to_world(x_surf_mpm)
 
+        # Direct PLY mode: compute displacement-based positions
+        if self._ply_direct:
+            # Displacement of each surface particle from its initial position
+            disp = x_surf_world - self._surf_init_world
+            # Apply displacement to each PLY Gaussian via its mapped surface particle
+            ply_disp = disp[self._ply_to_surface]
+            x_ply_world = self._ply_init_xyz + ply_disp
+            # Map damage to PLY Gaussians via surface mapping
+            c_ply = c_surf[self._ply_to_surface]
+        else:
+            x_ply_world = x_surf_world
+            c_ply = c_surf
+
         # Build debris mask: small fragments hidden before visualization
         debris_mask = None
         if (self.fragmentation_active
@@ -1296,17 +1323,29 @@ class HybridCrackSimulator:
                 and self.fragment_manager.n_fragments > 1):
             frag_ids = self.fragment_manager.fragment_ids
             surf_frag_ids = frag_ids[self.surface_mask]
-            debris_mask = torch.zeros(x_surf_world.shape[0],
-                                      dtype=torch.bool, device=x_surf_world.device)
-            for frag_idx in self.fragment_manager.fragment_particle_indices:
-                if (len(frag_idx) == 0
-                        or len(frag_idx) >= self.fragment_manager.min_fragment_particles):
-                    continue
-                frag_label = frag_ids[frag_idx[0]].item()
-                debris_mask |= (surf_frag_ids == frag_label)
+            if self._ply_direct:
+                # Map debris mask from surface to PLY Gaussians
+                surf_debris = torch.zeros(x_surf_world.shape[0],
+                                          dtype=torch.bool, device=x_surf_world.device)
+                for frag_idx in self.fragment_manager.fragment_particle_indices:
+                    if (len(frag_idx) == 0
+                            or len(frag_idx) >= self.fragment_manager.min_fragment_particles):
+                        continue
+                    frag_label = frag_ids[frag_idx[0]].item()
+                    surf_debris |= (surf_frag_ids == frag_label)
+                debris_mask = surf_debris[self._ply_to_surface]
+            else:
+                debris_mask = torch.zeros(x_surf_world.shape[0],
+                                          dtype=torch.bool, device=x_surf_world.device)
+                for frag_idx in self.fragment_manager.fragment_particle_indices:
+                    if (len(frag_idx) == 0
+                            or len(frag_idx) >= self.fragment_manager.min_fragment_particles):
+                        continue
+                    frag_label = frag_ids[frag_idx[0]].item()
+                    debris_mask |= (surf_frag_ids == frag_label)
 
         self.visualizer.update_gaussians(
-            self.gaussians, c_surf, x_surf_world,
+            self.gaussians, c_ply, x_ply_world,
             preserve_original=True,
             debris_mask=debris_mask)
 

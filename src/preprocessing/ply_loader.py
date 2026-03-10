@@ -94,34 +94,84 @@ class PretrainedPlyLoader:
             'sh_degree': ply_sh_degree,
         }
 
-    def normalize_positions(self, ply_xyz: np.ndarray):
-        """Normalize .ply positions to [0.025, 0.975]^3 (matching mesh normalization).
+    def normalize_positions(self, ply_xyz: np.ndarray,
+                            mesh_center: np.ndarray = None,
+                            mesh_scale: float = None):
+        """Normalize .ply positions using mesh coordinate system.
+
+        If mesh_center/mesh_scale are provided, PLY is normalized using the
+        SAME transform as the mesh, ensuring spatial alignment. Otherwise
+        falls back to independent normalization (legacy, causes misalignment
+        for scenes where the PLY extent differs from the mesh extent).
 
         Args:
             ply_xyz: (M, 3) raw positions from .ply
+            mesh_center: (3,) original mesh bbox center (from mesh_converter)
+            mesh_scale: float, original mesh bbox max extent
 
         Returns:
             normalized: (M, 3) positions in [0,1]^3
             scale_factor: float, uniform scale applied (for splat scale adjustment)
         """
-        bbox_min = ply_xyz.min(axis=0)
-        bbox_max = ply_xyz.max(axis=0)
-        center = (bbox_min + bbox_max) / 2.0
-        extent = (bbox_max - bbox_min).max()
-
-        # Match mesh_converter.py normalization: 95% fill in [0,1]^3
-        normalized = (ply_xyz - center) / extent * 0.95 + 0.5
-        scale_factor = 0.95 / extent
+        if mesh_center is not None and mesh_scale is not None:
+            # Align to mesh: use the SAME center and scale as mesh_converter
+            normalized = (ply_xyz - mesh_center) / mesh_scale * 0.95 + 0.5
+            scale_factor = 0.95 / mesh_scale
+            print(f"  - Aligning PLY to mesh coordinate system")
+            print(f"  - Mesh center: {mesh_center}, mesh scale: {mesh_scale:.4f}")
+        else:
+            # Legacy: independent normalization (PLY's own bbox)
+            bbox_min = ply_xyz.min(axis=0)
+            bbox_max = ply_xyz.max(axis=0)
+            center = (bbox_min + bbox_max) / 2.0
+            extent = (bbox_max - bbox_min).max()
+            normalized = (ply_xyz - center) / extent * 0.95 + 0.5
+            scale_factor = 0.95 / extent
+            print(f"  - WARNING: Independent normalization (no mesh alignment)")
 
         self._normalization_scale = scale_factor
-        self._normalization_center = center
+        self._normalization_center = mesh_center
 
-        print(f"  - PLY bbox: [{bbox_min}] to [{bbox_max}]")
-        print(f"  - Center: {center}, extent: {extent:.4f}")
         print(f"  - Scale factor: {scale_factor:.6f}")
-        print(f"  - Normalized range: [{normalized.min(axis=0)}] to [{normalized.max(axis=0)}]")
+        print(f"  - Normalized range: [{normalized.min(axis=0)}] to "
+              f"[{normalized.max(axis=0)}]")
 
         return normalized, scale_factor
+
+    def filter_foreground(self, ply_xyz_norm: np.ndarray,
+                          surface_xyz: np.ndarray,
+                          max_distance: float = 0.08):
+        """Filter PLY Gaussians to keep only those near the mesh surface.
+
+        Removes background Gaussians (sky, ground, distant objects) that
+        are not part of the target object.
+
+        Args:
+            ply_xyz_norm: (M, 3) normalized PLY positions
+            surface_xyz: (N, 3) mesh surface particle positions in [0,1]^3
+            max_distance: maximum distance to nearest surface particle
+
+        Returns:
+            fg_mask: (M,) boolean mask — True for foreground Gaussians
+            dists: (M,) distance to nearest surface particle
+        """
+        from sklearn.neighbors import NearestNeighbors
+
+        nn_model = NearestNeighbors(n_neighbors=1, algorithm='kd_tree')
+        nn_model.fit(surface_xyz)
+        dists, _ = nn_model.kneighbors(ply_xyz_norm)
+        dists = dists.flatten()
+
+        fg_mask = dists <= max_distance
+        n_fg = fg_mask.sum()
+        n_bg = (~fg_mask).sum()
+        print(f"  [Foreground Filter] {n_fg} kept, {n_bg} removed "
+              f"(threshold={max_distance:.3f})")
+        print(f"  - Foreground distances: min={dists[fg_mask].min():.4f}, "
+              f"max={dists[fg_mask].max():.4f}, "
+              f"median={np.median(dists[fg_mask]):.4f}")
+
+        return fg_mask, dists
 
     def match_to_surface_particles(
         self,
@@ -146,7 +196,7 @@ class PretrainedPlyLoader:
         distances = distances.flatten()
         indices = indices.flatten()
 
-        print(f"  [PLY Match] {len(surface_xyz)} surface particles → "
+        print(f"  [PLY Match] {len(surface_xyz)} surface particles -> "
               f"{len(ply_xyz_normalized)} PLY splats")
         print(f"  - Distance: min={distances.min():.6f}, "
               f"max={distances.max():.6f}, mean={distances.mean():.6f}, "
@@ -161,6 +211,62 @@ class PretrainedPlyLoader:
 
         return indices, distances
 
+    def _build_sh_rest(self, ply_data, indices, gaussians, count):
+        """Build SH rest features with degree matching."""
+        ply_sh = ply_data['sh_degree']
+        target_sh = gaussians.max_sh_degree
+        target_rest = (target_sh + 1) ** 2 - 1
+        ply_rest = (ply_sh + 1) ** 2 - 1
+        rest_raw = ply_data['features_rest'][indices]
+
+        if ply_rest == 0 or target_rest == 0:
+            rest = np.zeros((count, 3, max(target_rest, 1)))
+            if ply_rest > 0 and target_rest > 0:
+                c = min(ply_rest, target_rest)
+                rest[:, :, :c] = rest_raw[:, :, :c]
+        elif ply_rest >= target_rest:
+            rest = rest_raw[:, :, :target_rest]
+        else:
+            rest = np.zeros((count, 3, target_rest))
+            rest[:, :, :ply_rest] = rest_raw
+
+        return torch.tensor(rest, dtype=torch.float, device="cuda"
+                            ).transpose(1, 2).contiguous()
+
+    def _compute_scale_adjustment(self, scales_raw, scale_factor,
+                                  scale_multiplier):
+        """Compute scale adjustment with auto scene-size compensation.
+
+        Targets median ~0.001 linear in [0,1]^3 space (~4px at standard camera).
+        """
+        scale_adj = math.log(scale_factor)
+        if scale_multiplier != 1.0:
+            scale_adj += math.log(scale_multiplier)
+        scales = scales_raw + scale_adj
+
+        # Auto-compensate: target median matches lego reference (~4px)
+        TARGET_MEDIAN_LOG = -6.83  # log(0.00108)
+        median_s = np.median(scales)
+        boost = TARGET_MEDIAN_LOG - median_s
+        if abs(boost) > 0.5:
+            scales = scales + boost
+            print(f"  - Auto scale boost: {boost:+.2f} "
+                  f"(median {median_s:.2f} -> {TARGET_MEDIAN_LOG:.2f})")
+
+        # Cap outliers at p97 to prevent background blobs
+        p97 = np.percentile(scales, 97)
+        cap = min(p97, TARGET_MEDIAN_LOG + 4.0)
+        n_capped = (scales > cap).sum()
+        if n_capped > 0:
+            scales = np.clip(scales, None, cap)
+            print(f"  - Scale cap at {cap:.2f}: {n_capped} capped "
+                  f"(linear {np.exp(cap):.4f})")
+
+        print(f"  - Scale (log): median={np.median(scales):.2f}, "
+              f"max={scales.max():.2f}")
+
+        return scales
+
     def create_matched_gaussians(
         self,
         gaussians,
@@ -170,80 +276,29 @@ class PretrainedPlyLoader:
         scale_factor: float,
         scale_multiplier: float = 1.0,
     ):
-        """Populate GaussianModel with surface positions + matched .ply appearance.
-
-        Args:
-            gaussians: GaussianModel instance (empty, will be populated)
-            surface_pcd: BasicPointCloud with surface particle positions
-            ply_data: dict from load_raw_ply()
-            match_indices: (N,) indices from match_to_surface_particles()
-            scale_factor: from normalize_positions()
-            scale_multiplier: optional manual scale adjustment
-        """
+        """Populate GaussianModel with surface positions + matched .ply appearance."""
         N = surface_pcd.points.shape[0]
 
-        # Positions: from surface particles (MPM will drive these)
         xyz = torch.tensor(
-            np.asarray(surface_pcd.points), dtype=torch.float, device="cuda"
-        )
-
-        # SH DC features: from matched .ply splats
+            np.asarray(surface_pcd.points), dtype=torch.float, device="cuda")
         features_dc = torch.tensor(
             ply_data['features_dc'][match_indices],
             dtype=torch.float, device="cuda"
-        ).transpose(1, 2).contiguous()  # (N, 3, 1) → (N, 1, 3)
-
-        # SH rest: handle degree mismatch
-        ply_sh = ply_data['sh_degree']
-        target_sh = gaussians.max_sh_degree
-        target_rest_count = (target_sh + 1) ** 2 - 1
-        ply_rest_count = (ply_sh + 1) ** 2 - 1
-
-        rest_matched = ply_data['features_rest'][match_indices]  # (N, 3, ply_rest)
-
-        if ply_rest_count == 0 or target_rest_count == 0:
-            rest = np.zeros((N, 3, max(target_rest_count, 1)))
-            if ply_rest_count > 0 and target_rest_count > 0:
-                copy_count = min(ply_rest_count, target_rest_count)
-                rest[:, :, :copy_count] = rest_matched[:, :, :copy_count]
-        elif ply_rest_count >= target_rest_count:
-            rest = rest_matched[:, :, :target_rest_count]
-        else:
-            rest = np.zeros((N, 3, target_rest_count))
-            rest[:, :, :ply_rest_count] = rest_matched
-
-        if ply_sh != target_sh:
-            print(f"  [SH Degree] PLY={ply_sh}, config={target_sh} "
-                  f"→ {'truncated' if ply_sh > target_sh else 'padded with zeros'}")
-
-        features_rest = torch.tensor(
-            rest, dtype=torch.float, device="cuda"
-        ).transpose(1, 2).contiguous()  # (N, 3, rest) → (N, rest, 3)
-
-        # Opacity: from .ply (already in inverse-sigmoid / logit space)
+        ).transpose(1, 2).contiguous()
+        features_rest = self._build_sh_rest(
+            ply_data, match_indices, gaussians, N)
         opacity = torch.tensor(
             ply_data['opacity'][match_indices],
-            dtype=torch.float, device="cuda"
-        )
+            dtype=torch.float, device="cuda")
 
-        # Scale: from .ply, adjusted for coordinate normalization
-        scales_raw = ply_data['scaling'][match_indices]  # (N, 3), log-space
-        scale_adjustment = math.log(scale_factor)
-        if scale_multiplier != 1.0:
-            scale_adjustment += math.log(scale_multiplier)
-        scales_adjusted = scales_raw + scale_adjustment
+        scales_adjusted = self._compute_scale_adjustment(
+            ply_data['scaling'][match_indices], scale_factor, scale_multiplier)
+        scaling = torch.tensor(scales_adjusted, dtype=torch.float, device="cuda")
 
-        scaling = torch.tensor(
-            scales_adjusted, dtype=torch.float, device="cuda"
-        )
-
-        # Rotation: from .ply (quaternions, preserved under uniform scaling)
         rotation = torch.tensor(
             ply_data['rotation'][match_indices],
-            dtype=torch.float, device="cuda"
-        )
+            dtype=torch.float, device="cuda")
 
-        # Assign as nn.Parameters
         gaussians._xyz = nn.Parameter(xyz.requires_grad_(True))
         gaussians._features_dc = nn.Parameter(features_dc.requires_grad_(True))
         gaussians._features_rest = nn.Parameter(features_rest.requires_grad_(True))
@@ -252,20 +307,103 @@ class PretrainedPlyLoader:
         gaussians._rotation = nn.Parameter(rotation.requires_grad_(True))
         gaussians.active_sh_degree = gaussians.max_sh_degree
 
-        # Normals (needed for impact front-face detection)
         normals = np.asarray(surface_pcd.normals)
         if normals is not None and len(normals) > 0:
             gaussians._normal = torch.tensor(
-                normals, dtype=torch.float, device="cuda"
-            )
+                normals, dtype=torch.float, device="cuda")
         else:
             gaussians._normal = torch.zeros((N, 3), device="cuda")
 
-        # Safe defaults for exposure (prevents AttributeError)
         gaussians.exposure_mapping = {}
         gaussians.pretrained_exposures = None
         gaussians.max_radii2D = torch.zeros(N, device="cuda")
 
-        print(f"  [Gaussians] Populated {N} splats with pretrained appearance")
-        print(f"  - Scale adjustment: {scale_adjustment:.4f} "
-              f"(factor={scale_factor:.6f}, multiplier={scale_multiplier:.2f})")
+        print(f"  [Gaussians] Populated {N} matched splats")
+
+    def create_direct_gaussians(
+        self,
+        gaussians,
+        ply_data: dict,
+        ply_xyz_normalized: np.ndarray,
+        surface_xyz: np.ndarray,
+        scale_factor: float,
+        scale_multiplier: float = 1.0,
+        fg_mask: np.ndarray = None,
+    ):
+        """Populate GaussianModel with foreground PLY Gaussians (no duplication).
+
+        Uses only foreground Gaussians (filtered by fg_mask). Each PLY Gaussian
+        maps to its nearest surface particle for deformation tracking.
+
+        Args:
+            gaussians: GaussianModel instance
+            ply_data: dict from load_raw_ply()
+            ply_xyz_normalized: (M, 3) normalized PLY positions
+            surface_xyz: (N, 3) surface particle positions
+            scale_factor: from normalize_positions()
+            scale_multiplier: optional manual scale adjustment
+            fg_mask: (M,) boolean mask from filter_foreground()
+
+        Returns:
+            ply_to_surface: (K,) index of nearest surface particle per kept Gaussian
+        """
+        from sklearn.neighbors import NearestNeighbors
+
+        # Apply foreground filter
+        if fg_mask is not None:
+            indices = np.where(fg_mask)[0]
+            xyz_fg = ply_xyz_normalized[indices]
+            print(f"  [Direct PLY] Using {len(indices)} foreground Gaussians")
+        else:
+            indices = np.arange(len(ply_xyz_normalized))
+            xyz_fg = ply_xyz_normalized
+
+        K = len(xyz_fg)
+
+        # Map each PLY Gaussian to nearest surface particle
+        nn_model = NearestNeighbors(n_neighbors=1, algorithm='kd_tree')
+        nn_model.fit(surface_xyz)
+        dists, surf_idx = nn_model.kneighbors(xyz_fg)
+        ply_to_surface = surf_idx.flatten()
+
+        # Positions
+        xyz = torch.tensor(xyz_fg, dtype=torch.float, device="cuda")
+
+        # SH
+        features_dc = torch.tensor(
+            ply_data['features_dc'][indices],
+            dtype=torch.float, device="cuda"
+        ).transpose(1, 2).contiguous()
+        features_rest = self._build_sh_rest(
+            ply_data, indices, gaussians, K)
+
+        # Opacity
+        opacity = torch.tensor(
+            ply_data['opacity'][indices], dtype=torch.float, device="cuda")
+
+        # Scales with auto-compensation
+        scales_adjusted = self._compute_scale_adjustment(
+            ply_data['scaling'][indices], scale_factor, scale_multiplier)
+        scaling = torch.tensor(
+            scales_adjusted, dtype=torch.float, device="cuda")
+
+        # Rotation
+        rotation = torch.tensor(
+            ply_data['rotation'][indices], dtype=torch.float, device="cuda")
+
+        # Assign
+        gaussians._xyz = nn.Parameter(xyz.requires_grad_(True))
+        gaussians._features_dc = nn.Parameter(features_dc.requires_grad_(True))
+        gaussians._features_rest = nn.Parameter(features_rest.requires_grad_(True))
+        gaussians._opacity = nn.Parameter(opacity.requires_grad_(True))
+        gaussians._scaling = nn.Parameter(scaling.requires_grad_(True))
+        gaussians._rotation = nn.Parameter(rotation.requires_grad_(True))
+        gaussians.active_sh_degree = gaussians.max_sh_degree
+        gaussians._normal = torch.zeros((K, 3), device="cuda")
+        gaussians.exposure_mapping = {}
+        gaussians.pretrained_exposures = None
+        gaussians.max_radii2D = torch.zeros(K, device="cuda")
+
+        print(f"  [Gaussians] Direct PLY: {K} foreground splats")
+
+        return ply_to_surface

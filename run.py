@@ -250,7 +250,13 @@ def setup_mesh(config: OmegaConf):
 
     volume_pcd, surface_pcd, surface_mask = converter.convert()
 
-    return volume_pcd, surface_pcd, surface_mask
+    # Expose mesh normalization metadata for PLY alignment
+    mesh_meta = {
+        'center': converter._original_center,
+        'scale': converter._original_scale,
+    }
+
+    return volume_pcd, surface_pcd, surface_mask, mesh_meta
 
 
 # ============================================================================
@@ -359,7 +365,8 @@ def setup_elasticity(config: OmegaConf, device: torch.device):
     return elasticity
 
 
-def setup_gaussians(config: OmegaConf, surface_pcd, device: torch.device):
+def setup_gaussians(config: OmegaConf, surface_pcd, device: torch.device,
+                    mesh_meta: dict = None):
     """
     Initialize Gaussian Splatting model
 
@@ -403,19 +410,44 @@ def setup_gaussians(config: OmegaConf, surface_pcd, device: torch.device):
         from src.preprocessing.ply_loader import PretrainedPlyLoader
 
         scale_mult = config.gaussian_splatting.get("pretrained_scale_multiplier", 1.0)
+        use_direct = config.gaussian_splatting.get("ply_direct", False)
+        fg_distance = config.gaussian_splatting.get("ply_fg_distance", 0.08)
+
         loader = PretrainedPlyLoader(
             ply_path=pretrained_ply,
             sh_degree=config.gaussian_splatting.sh_degree,
         )
         ply_data = loader.load_raw_ply()
-        ply_xyz_norm, scale_factor = loader.normalize_positions(ply_data['xyz'])
-        match_indices, distances = loader.match_to_surface_particles(
-            ply_xyz_norm, np.asarray(surface_pcd.points)
-        )
-        loader.create_matched_gaussians(
-            gaussians, surface_pcd, ply_data, match_indices,
-            scale_factor, scale_multiplier=scale_mult
-        )
+
+        # Align PLY to mesh coordinate system (uses same center/scale as mesh)
+        mesh_center = mesh_meta.get('center') if mesh_meta else None
+        mesh_scale = mesh_meta.get('scale') if mesh_meta else None
+        ply_xyz_norm, scale_factor = loader.normalize_positions(
+            ply_data['xyz'], mesh_center=mesh_center, mesh_scale=mesh_scale)
+
+        surface_xyz = np.asarray(surface_pcd.points)
+
+        if use_direct:
+            # Direct PLY mode: use foreground PLY Gaussians directly
+            fg_mask, _ = loader.filter_foreground(
+                ply_xyz_norm, surface_xyz, max_distance=fg_distance)
+            ply_to_surface = loader.create_direct_gaussians(
+                gaussians, ply_data, ply_xyz_norm, surface_xyz,
+                scale_factor, scale_multiplier=scale_mult,
+                fg_mask=fg_mask)
+            # Store mapping for displacement tracking
+            gaussians._ply_to_surface = ply_to_surface
+            gaussians._ply_direct_mode = True
+            print(f"  - Direct PLY mode: {fg_mask.sum()} foreground Gaussians")
+        else:
+            # Matched mode: one Gaussian per surface particle
+            match_indices, distances = loader.match_to_surface_particles(
+                ply_xyz_norm, surface_xyz)
+            loader.create_matched_gaussians(
+                gaussians, surface_pcd, ply_data, match_indices,
+                scale_factor, scale_multiplier=scale_mult)
+            gaussians._ply_direct_mode = False
+
         print(f"  - Loaded pretrained PLY: {pretrained_ply}")
     else:
         # Procedural gray splats from mesh
@@ -1253,11 +1285,11 @@ def main():
 
     try:
         # Pipeline execution
-        volume_pcd, surface_pcd, surface_mask = setup_mesh(config)
+        volume_pcd, surface_pcd, surface_mask, mesh_meta = setup_mesh(config)
         mpm_model = setup_mpm(config, volume_pcd, device)
         loading_params = setup_loading(config, mpm_model, device)
         elasticity = setup_elasticity(config, device)
-        gaussians = setup_gaussians(config, surface_pcd, device)
+        gaussians = setup_gaussians(config, surface_pcd, device, mesh_meta=mesh_meta)
 
         simulator = setup_simulator(
             config, mpm_model, gaussians, elasticity,
@@ -1287,12 +1319,86 @@ def main():
             z_shift = drop_center_z - z_current_center
             simulator.x_mpm[:, 2] += z_shift
 
+            # Apply drop rotation (Euler XYZ degrees) around object center
+            drop_rotation = config.loading.get('drop_rotation', None)
+            if drop_rotation is not None:
+                rot_deg = [float(r) for r in drop_rotation]
+                rot_rad = [np.radians(r) for r in rot_deg]
+                # Build rotation matrix (XYZ Euler)
+                cx, sx = np.cos(rot_rad[0]), np.sin(rot_rad[0])
+                cy, sy = np.cos(rot_rad[1]), np.sin(rot_rad[1])
+                cz, sz = np.cos(rot_rad[2]), np.sin(rot_rad[2])
+                Rx = np.array([[1,0,0],[0,cx,-sx],[0,sx,cx]])
+                Ry = np.array([[cy,0,sy],[0,1,0],[-sy,0,cy]])
+                Rz = np.array([[cz,-sz,0],[sz,cz,0],[0,0,1]])
+                R_mat = torch.tensor(Rz @ Ry @ Rx, dtype=torch.float32, device=device)
+
+                obj_center = simulator.x_mpm.mean(dim=0)
+                simulator.x_mpm = obj_center + (simulator.x_mpm - obj_center) @ R_mat.T
+                print(f"  - Drop rotation: {rot_deg} deg")
+
             # Adjust Gaussian splat scales for the object shrinkage
             if config.gaussian_splatting.get("pretrained_ply", None) is not None:
                 import math as _math
                 simulator.gaussians._scaling.data += _math.log(drop_scale)
                 print(f"  - Pretrained splat scales adjusted by log({drop_scale})="
                       f"{_math.log(drop_scale):.4f}")
+
+                # Direct PLY mode: rescale PLY initial positions to match MPM
+                if getattr(simulator, '_ply_direct', False):
+                    ply_center = torch.tensor([0.5, 0.5, 0.5], device=device)
+                    simulator._ply_init_xyz = (
+                        ply_center + (simulator._ply_init_xyz - ply_center) * drop_scale)
+                    simulator._ply_init_xyz[:, 2] += z_shift
+                    # Apply same rotation to PLY positions and quaternions
+                    if drop_rotation is not None:
+                        ply_obj_center = simulator._ply_init_xyz.mean(dim=0)
+                        simulator._ply_init_xyz = (
+                            ply_obj_center + (simulator._ply_init_xyz - ply_obj_center) @ R_mat.T)
+                        # Rotate Gaussian quaternions: q_new = q_rot * q_old
+                        # Convert rotation matrix to quaternion
+                        R = R_mat.cpu().numpy()
+                        tr = R[0,0] + R[1,1] + R[2,2]
+                        if tr > 0:
+                            s = np.sqrt(tr + 1.0) * 2
+                            qw = 0.25 * s
+                            qx = (R[2,1] - R[1,2]) / s
+                            qy = (R[0,2] - R[2,0]) / s
+                            qz = (R[1,0] - R[0,1]) / s
+                        elif R[0,0] > R[1,1] and R[0,0] > R[2,2]:
+                            s = np.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2]) * 2
+                            qw = (R[2,1] - R[1,2]) / s
+                            qx = 0.25 * s
+                            qy = (R[0,1] + R[1,0]) / s
+                            qz = (R[0,2] + R[2,0]) / s
+                        elif R[1,1] > R[2,2]:
+                            s = np.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2]) * 2
+                            qw = (R[0,2] - R[2,0]) / s
+                            qx = (R[0,1] + R[1,0]) / s
+                            qy = 0.25 * s
+                            qz = (R[1,2] + R[2,1]) / s
+                        else:
+                            s = np.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1]) * 2
+                            qw = (R[1,0] - R[0,1]) / s
+                            qx = (R[0,2] + R[2,0]) / s
+                            qy = (R[1,2] + R[2,1]) / s
+                            qz = 0.25 * s
+                        q_rot = torch.tensor([qw, qx, qy, qz],
+                                             dtype=torch.float32, device=device)
+                        # Hamilton product: q_rot * q_old for each Gaussian
+                        q_old = simulator.gaussians._rotation.data  # (K, 4) wxyz
+                        w1, x1, y1, z1 = q_rot[0], q_rot[1], q_rot[2], q_rot[3]
+                        w2, x2, y2, z2 = q_old[:,0], q_old[:,1], q_old[:,2], q_old[:,3]
+                        q_new = torch.stack([
+                            w1*w2 - x1*x2 - y1*y2 - z1*z2,
+                            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+                            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+                            w1*z2 + x1*y2 - y1*x2 + z1*w2,
+                        ], dim=-1)
+                        simulator.gaussians._rotation.data = q_new
+                    # Update surface initial positions
+                    simulator._surf_init_world = simulator.mapper.mpm_to_world(
+                        simulator.x_mpm[simulator.surface_mask])
 
             z_min = simulator.x_mpm[:, 2].min().item()
             z_max = simulator.x_mpm[:, 2].max().item()
