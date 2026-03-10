@@ -1245,7 +1245,7 @@ class HybridCrackSimulator:
             if (self._gravity_drop and self._gravity_drop_contacted and
                     hasattr(self, '_impact_frame_count')):
                 frames_since = self._impact_frame_count
-                burst_schedule = {0: 30, 1: 10, 2: 5}
+                burst_schedule = {0: 50, 1: 20, 2: 10, 3: 5}
                 if frames_since in burst_schedule:
                     burst_iters = burst_schedule[frames_since]
                     print(f"  [BURST] Impact frame+{frames_since}: "
@@ -1268,7 +1268,7 @@ class HybridCrackSimulator:
         if (self.fragment_manager is not None
                 and self._gravity_drop and self._gravity_drop_contacted
                 and hasattr(self, '_impact_frame_count')
-                and self._impact_frame_count in (5, 10, 20, 40)
+                and self._impact_frame_count in (1, 2, 3, 5, 10, 20, 40)
                 and hasattr(self, 'grid_occupied')
                 and hasattr(self, 'crack_paths') and len(self.crack_paths) > 0):
             n_frags = self._detect_fragments_from_crack_planes()
@@ -1303,6 +1303,9 @@ class HybridCrackSimulator:
             self.c_vol, self.x_mpm, x_surf_mpm, self.surface_mask)
         x_surf_world = self.mapper.mpm_to_world(x_surf_mpm)
 
+        # Extract deformation gradient for surface particles
+        F_surf = self.F[self.surface_mask]  # (N_surf, 3, 3)
+
         # Direct PLY mode: compute displacement-based positions
         if self._ply_direct:
             # Displacement of each surface particle from its initial position
@@ -1312,9 +1315,12 @@ class HybridCrackSimulator:
             x_ply_world = self._ply_init_xyz + ply_disp
             # Map damage to PLY Gaussians via surface mapping
             c_ply = c_surf[self._ply_to_surface]
+            # Map deformation gradient to PLY Gaussians
+            F_ply = F_surf[self._ply_to_surface]
         else:
             x_ply_world = x_surf_world
             c_ply = c_surf
+            F_ply = F_surf
 
         # Build debris mask: small fragments hidden before visualization
         debris_mask = None
@@ -1347,7 +1353,8 @@ class HybridCrackSimulator:
         self.visualizer.update_gaussians(
             self.gaussians, c_ply, x_ply_world,
             preserve_original=True,
-            debris_mask=debris_mask)
+            debris_mask=debris_mask,
+            F_per_gaussian=F_ply)
 
         self._save_diagnostics_if_needed()
 

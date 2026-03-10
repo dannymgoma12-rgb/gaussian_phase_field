@@ -61,7 +61,7 @@ loading:
   drop_scale: 0.33
   type: gravity_drop
 material:
-  Gc: 80000.0
+  Gc: 40000.0
   center:
   - 0.5
   - 0.5
@@ -108,15 +108,15 @@ phase_field:
   branch_min_length: 2
   branch_probability: 0.75
   crack_aniso_ratio: 200.0
-  crack_tip_speed: 20.0
+  crack_tip_speed: 30.0
   crack_width: 0.004
   dC_max: 0.25
-  fragment_damage_threshold: 0.5
+  fragment_damage_threshold: 0.35
   fragmentation_enabled: true
   max_branches_per_path: 5
-  max_nucleation_per_frame: 1
-  max_total_cracks: 64
-  min_fragment_particles: 50
+  max_nucleation_per_frame: 3
+  max_total_cracks: 96
+  min_fragment_particles: 30
   nucleation_fraction: 0.35
   nucleation_min_spacing: 10
   warmup_frames: 1
@@ -140,7 +140,7 @@ rendering:
   image_height: 1920
   image_width: 1920
   physics_substeps: 15
-  total_frames: 100
+  total_frames: 150
 seismic:
   amplitude: 3500.0
   direction:
