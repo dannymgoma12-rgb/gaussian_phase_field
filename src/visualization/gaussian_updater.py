@@ -16,14 +16,21 @@ class GaussianCrackVisualizer:
         self,
         damage_threshold: float = 0.3,
         device: str = "cuda",
+        light_dir: tuple = (0.4, 0.3, 0.8),
     ):
         self.damage_threshold = damage_threshold
         self.device = device
+
+        # Light direction for dynamic diffuse shading
+        ld = torch.tensor(light_dir, dtype=torch.float32, device=device)
+        self.light_dir = ld / ld.norm()
 
         self._original_dc = None
         self._original_rest = None
         self._original_opacity = None
         self._original_scaling = None
+        self._original_rotation = None
+        self._initial_normals = None  # stored on first call
 
         print(f"[GaussianCrackVisualizer] Initialized (AT2 damage mode)")
         print(f"  - Damage threshold: {damage_threshold}")
@@ -33,30 +40,30 @@ class GaussianCrackVisualizer:
     def _apply_damage_visualization(self, gaussians, c_surface: Tensor):
         """Visualize AT2 damage field on Gaussian Splats.
 
-        Maps c_surface → scale shrinkage + opacity reduction.
-        Smooth cubic falloff avoids hard seams at damage boundaries.
+        Only affects the narrow crack band. Fragments stay sharp and visible.
+        - Scale shrinkage only for very high damage (crack gap)
+        - Opacity reduction only at crack center (c > 0.85)
         """
         thresh = self.damage_threshold
 
-        # Scale shrinkage: gradual onset from thresh*0.5
-        low_thresh = thresh * 0.5
-        damaged = c_surface > low_thresh
-        if damaged.any():
-            t = ((c_surface[damaged] - low_thresh)
-                 / (1.0 - low_thresh)).clamp(0.0, 1.0)
-            scale_mult = 1.0 - 0.9 * (t ** 2) * (3.0 - 2.0 * t)  # cubic
-            gaussians._scaling.data[damaged] += torch.log(
-                scale_mult.unsqueeze(1).clamp(min=0.01))
+        # Scale shrinkage: only for high-damage crack region
+        crack_band = c_surface > thresh
+        if crack_band.any():
+            t = ((c_surface[crack_band] - thresh)
+                 / (1.0 - thresh)).clamp(0.0, 1.0)
+            # Moderate shrinkage (50% max) — keeps fragments solid
+            scale_mult = 1.0 - 0.5 * (t ** 3)
+            gaussians._scaling.data[crack_band] += torch.log(
+                scale_mult.unsqueeze(1).clamp(min=0.05))
 
-        # Opacity reduction: aggressive fade at high damage
-        high_damage = c_surface > thresh
-        if high_damage.any():
-            t_o = ((c_surface[high_damage] - thresh)
-                   / (1.0 - thresh)).clamp(0.0, 1.0)
-            opacity_mult = 1.0 - 0.95 * (t_o ** 2)
-            cur_prob = torch.sigmoid(gaussians._opacity.data[high_damage])
+        # Opacity reduction: only at crack center (very high damage)
+        crack_center = c_surface > 0.85
+        if crack_center.any():
+            t_o = ((c_surface[crack_center] - 0.85) / 0.15).clamp(0.0, 1.0)
+            opacity_mult = 1.0 - 0.7 * (t_o ** 2)
+            cur_prob = torch.sigmoid(gaussians._opacity.data[crack_center])
             new_prob = (cur_prob * opacity_mult.unsqueeze(1)).clamp(1e-6, 1 - 1e-6)
-            gaussians._opacity.data[high_damage] = torch.log(
+            gaussians._opacity.data[crack_center] = torch.log(
                 new_prob / (1.0 - new_prob))
 
     @torch.no_grad()
@@ -166,6 +173,53 @@ class GaussianCrackVisualizer:
             w1*z2 + x1*y2 - y1*x2 + z1*w2,
         ], dim=-1)
 
+    def set_initial_normals(self, normals: Tensor):
+        """Store initial surface normals for dynamic lighting.
+
+        Args:
+            normals: (N_surf, 3) unit normals from mesh sampling
+        """
+        self._initial_normals = normals.to(self.device).float()
+
+    @torch.no_grad()
+    def _apply_dynamic_lighting(self, gaussians, F_per_gaussian: Tensor):
+        """Recompute diffuse shading based on rotated normals.
+
+        After fragments rotate, the baked-in shading no longer matches.
+        Extract R from F via polar decomposition, rotate initial normals,
+        recompute N·L, and update DC color.
+        """
+        if self._initial_normals is None:
+            return
+
+        N = gaussians._xyz.shape[0]
+        normals = self._initial_normals[:N]
+
+        if F_per_gaussian is not None and F_per_gaussian.shape[0] == N:
+            # Polar decomposition: F = R · S → extract R
+            U, sigma, Vt = torch.linalg.svd(F_per_gaussian)
+            det_sign = torch.det(U @ Vt).sign().unsqueeze(-1).unsqueeze(-1)
+            U_fixed = U.clone()
+            U_fixed[:, :, -1] *= det_sign.squeeze(-1)
+            R_mat = U_fixed @ Vt  # (N, 3, 3)
+
+            # Rotate normals: n' = R @ n
+            normals = torch.bmm(R_mat, normals.unsqueeze(-1)).squeeze(-1)
+            normals = torch.nn.functional.normalize(normals, dim=-1)
+
+        # Diffuse: N · L
+        ndotl = (normals * self.light_dir).sum(dim=-1).clamp(0.0, 1.0)
+
+        # Ambient + diffuse → gray value [0.25, 0.85]
+        gray = 0.25 + 0.6 * ndotl
+
+        # Convert to SH DC: color = SH_C0 * dc + 0.5 → dc = (color - 0.5) / SH_C0
+        SH_C0 = 0.28209479177387814
+        dc_val = (gray - 0.5) / SH_C0  # (N,)
+
+        # Update features_dc: shape (N, 1, 3)
+        gaussians._features_dc.data[:, 0, :] = dc_val.unsqueeze(-1).expand(-1, 3)
+
     def update_gaussians(
         self,
         gaussians,
@@ -206,6 +260,9 @@ class GaussianCrackVisualizer:
         # Apply deformation gradient to scale and rotation
         if F_per_gaussian is not None:
             self._apply_deformation_gradient(gaussians, F_per_gaussian)
+
+        # Dynamic lighting: recompute shading from rotated normals
+        self._apply_dynamic_lighting(gaussians, F_per_gaussian)
 
         # Debris: mild shrinkage + darkening (keep visible)
         if debris_mask is not None and debris_mask.any():

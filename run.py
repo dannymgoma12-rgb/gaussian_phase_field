@@ -587,6 +587,59 @@ def setup_simulator(
 # Rendering
 # ============================================================================
 
+@torch.no_grad()
+def _depth_to_normal(depth: torch.Tensor, camera) -> torch.Tensor:
+    """Compute screen-space normals from depth map via finite differences.
+
+    Works for ALL visible surfaces — external and crack interior alike.
+
+    Args:
+        depth: (1, H, W) depth map from rasterizer
+        camera: MiniCam with camera intrinsics
+
+    Returns:
+        normal: (3, H, W) world-space unit normals
+    """
+    d = depth.squeeze(0)  # (H, W)
+    H, W = d.shape
+
+    # Finite differences (central where possible)
+    dz_dx = torch.zeros_like(d)
+    dz_dy = torch.zeros_like(d)
+    dz_dx[:, 1:-1] = (d[:, 2:] - d[:, :-2]) / 2.0
+    dz_dy[1:-1, :] = (d[2:, :] - d[:-2, :]) / 2.0
+
+    # Pixel-to-world scale: at depth z, 1 pixel = z / focal
+    fx = camera.image_width / (2.0 * np.tan(camera.FoVx / 2.0))
+    fy = camera.image_height / (2.0 * np.tan(camera.FoVy / 2.0))
+
+    # Normal = (-dz/dx / fx, -dz/dy / fy, 1), then normalize
+    # This gives view-space normals
+    nx = -dz_dx / (fx + 1e-8)
+    ny = -dz_dy / (fy + 1e-8)
+    nz = torch.ones_like(d)
+
+    normal = torch.stack([nx, ny, nz], dim=0)  # (3, H, W)
+    norm = normal.norm(dim=0, keepdim=True).clamp(min=1e-8)
+    normal = normal / norm
+
+    # Transform view-space normals to world-space using inverse view rotation
+    # camera has world_view_transform (4x4)
+    view_mat = camera.world_view_transform.T  # column-major to row-major
+    R_view = view_mat[:3, :3]  # (3, 3) view rotation
+    R_inv = R_view.T  # inverse rotation = transpose
+
+    # Reshape for batch matmul: (3, H*W) -> (H*W, 3) -> matmul -> (3, H, W)
+    n_flat = normal.reshape(3, -1).T  # (H*W, 3)
+    n_world = (n_flat @ R_inv.T).T.reshape(3, H, W)
+
+    # Zero out background (depth == 0)
+    mask = (d > 0).unsqueeze(0).float()
+    n_world = n_world * mask
+
+    return n_world
+
+
 def setup_camera(config: OmegaConf):
     """
     Create rendering camera using proper camera system.
@@ -918,11 +971,12 @@ def run_simulation(config: OmegaConf, simulator, camera, args):
         )
         image = rendering["render"]
         depth = rendering["depth"]
-        normal = rendering.get("normal", None)
 
-        # Apply camera-aware lighting using normals
-        if normal is not None:
-            object_mask = (depth > 0).float()  # (1, H, W)
+        # Depth-to-normal post-process shading
+        # Works for ALL visible surfaces (external + crack interior)
+        object_mask = (depth > 0).float()  # (1, H, W)
+        if object_mask.sum() > 0:
+            normal_from_depth = _depth_to_normal(depth, camera)
 
             cam_pos = camera.camera_center
             scene_center = torch.tensor([0.5, 0.5, 0.5], device='cuda')
@@ -930,8 +984,8 @@ def run_simulation(config: OmegaConf, simulator, camera, args):
             light_dir = light_dir / (light_dir.norm() + 1e-8)
 
             light_dir_reshaped = light_dir.view(3, 1, 1)
-            diffuse = (normal * light_dir_reshaped).sum(dim=0, keepdim=True)
-            diffuse = torch.clamp(diffuse, 0.0, 1.0)
+            diffuse = (normal_from_depth * light_dir_reshaped).sum(
+                dim=0, keepdim=True).clamp(0.0, 1.0)
 
             ambient = 0.85
             lit_intensity = ambient + (1.0 - ambient) * diffuse
@@ -1295,6 +1349,12 @@ def main():
             config, mpm_model, gaussians, elasticity,
             surface_mask, device, loading_params=loading_params
         )
+
+        # Pass initial surface normals for dynamic lighting
+        if surface_pcd.normals is not None:
+            surf_normals = torch.from_numpy(
+                np.asarray(surface_pcd.normals)).float().to(device)
+            simulator.visualizer.set_initial_normals(surf_normals)
 
         # Initialize simulation
         simulator.initialize(torch.from_numpy(volume_pcd.points).float().to(device))

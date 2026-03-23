@@ -37,29 +37,29 @@ material:
   center: [0.5, 0.5, 0.5]
   size: [0.8, 0.8, 0.8]
   density: 1200.0
-  youngs_modulus: 1.0e7
+  youngs_modulus: 1.5e7
   poissons_ratio: 0.25
-  Gc: 120000.0
+  Gc: 60000.0
   l0: 0.025
   degradation_exponent: 3.0
 
 phase_field:
   warmup_frames: 1
   dC_max: 0.25
-  crack_tip_speed: 12.0
+  crack_tip_speed: 15.0
   crack_width: 0.004
-  max_total_cracks: 48
+  max_total_cracks: 120
   crack_aniso_ratio: 200.0
-  branch_angle: 55.0
-  branch_min_length: 2
-  branch_probability: 0.75
-  max_branches_per_path: 5
-  nucleation_fraction: 0.35
-  max_nucleation_per_frame: 1
-  nucleation_min_spacing: 10
+  branch_angle: 40.0
+  branch_min_length: 1
+  branch_probability: 0.95
+  max_branches_per_path: 10
+  nucleation_fraction: 0.15
+  max_nucleation_per_frame: 5
+  nucleation_min_spacing: 4
   fragmentation_enabled: true
-  fragment_damage_threshold: 0.5
-  min_fragment_particles: 50
+  fragment_damage_threshold: 0.40
+  min_fragment_particles: 20
 
 seismic:
   enabled: true                   # Overridden to false by gravity_drop
@@ -85,6 +85,7 @@ loading:
   type: "gravity_drop"
   drop_scale: 0.33
   drop_center_z: 0.7
+  drop_rotation: [30.0, 20.0, 0.0]
 
 coordinate_mapping:
   world_center: [0.5, 0.5, 0.5]

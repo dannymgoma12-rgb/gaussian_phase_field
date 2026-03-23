@@ -29,5 +29,8 @@ Thumbs.db
 .venv/
 venv/
 
+# Pretrained models (large PLY files)
+assets/trained/
+
 # Examples (empty)
 examples/

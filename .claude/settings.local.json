@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+     "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "WebFetch(*)",
+      "MCP(*)"
+    ],
+    "additionalDirectories": [
+      "c:\\dev\\gsplat_crack\\gaussian-splatting\\submodules\\diff-gaussian-rasterization\\diff_gaussian_rasterization"
+    ]
+  }
+}

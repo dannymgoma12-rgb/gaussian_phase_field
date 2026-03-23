@@ -136,11 +136,14 @@ class MeshToPointCloudConverter:
             # Interpolate colors from mesh vertices
             colors = self._interpolate_vertex_colors(mesh, points)
         else:
-            # Generate gray gradient (neutral for red crack visibility)
-            # Use Y-coordinate (height) for gradient: dark gray (bottom) → light gray (top)
-            gray_values = 0.3 + 0.4 * points[:, 1]  # Y: 0.3-0.7 (dark to light)
+            # Normal-based diffuse shading for 3D appearance
+            # Light from upper-right-front (matches typical camera angle)
+            light_dir = np.array([0.4, 0.3, 0.8])
+            light_dir /= np.linalg.norm(light_dir)
+            ndotl = np.clip((normals * light_dir).sum(axis=1), 0.0, 1.0)
+            # Ambient + diffuse: range [0.25, 0.85] for good contrast
+            gray_values = 0.25 + 0.6 * ndotl
             colors = np.stack([gray_values, gray_values, gray_values], axis=1)
-            colors = np.clip(colors, 0.0, 1.0)
 
         print(f"  - Sampled {len(points)} surface points")
         print(f"  - Position range: [{points.min():.3f}, {points.max():.3f}]")
