@@ -352,7 +352,19 @@ class MeshToPointCloudConverter:
 
         # Sample volume interior
         vol_pts, vol_colors = self.sample_volumetric_particles(mesh, n_volume)
-        vol_normals = np.zeros_like(vol_pts)  # No normals for interior
+        # Volume normals: radial direction from centroid (outward)
+        # When cracks expose interior, these normals provide proper shading
+        centroid = vol_pts.mean(axis=0)
+        vol_normals = vol_pts - centroid
+        vol_norms = np.linalg.norm(vol_normals, axis=1, keepdims=True)
+        vol_norms = np.maximum(vol_norms, 1e-8)
+        vol_normals = vol_normals / vol_norms
+
+        # Recompute volume colors using same N·L shading as surface
+        light_dir = np.array([0.4, 0.3, 0.8])
+        light_dir /= np.linalg.norm(light_dir)
+        ndotl = np.clip((vol_normals * light_dir).sum(axis=1), 0.0, 1.0)
+        vol_colors = np.stack([0.25 + 0.6 * ndotl] * 3, axis=1)
 
         # Combine for MPM (all particles)
         all_points = np.vstack([surf_pts, vol_pts])

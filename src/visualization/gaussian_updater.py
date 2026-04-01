@@ -182,7 +182,7 @@ class GaussianCrackVisualizer:
         self._initial_normals = normals.to(self.device).float()
 
     @torch.no_grad()
-    def _apply_dynamic_lighting(self, gaussians, F_per_gaussian: Tensor):
+    def _apply_dynamic_lighting(self, gaussians, F_per_gaussian: Tensor, c_surface: Tensor = None):
         """Recompute diffuse shading based on rotated normals.
 
         After fragments rotate, the baked-in shading no longer matches.
@@ -207,6 +207,19 @@ class GaussianCrackVisualizer:
             normals = torch.bmm(R_mat, normals.unsqueeze(-1)).squeeze(-1)
             normals = torch.nn.functional.normalize(normals, dim=-1)
 
+        # Flip back-facing normals ONLY for damaged regions (crack interiors)
+        # Use smoothed damage to avoid per-Gaussian flickering
+        if hasattr(self, '_camera_pos') and self._camera_pos is not None and c_surface is not None:
+            view_dir = self._camera_pos.unsqueeze(0) - gaussians._xyz.data[:N]
+            view_dir = torch.nn.functional.normalize(view_dir, dim=-1)
+            back_facing = (normals * view_dir).sum(dim=-1) < 0
+            # Smooth damage: max of self and neighbors via dilation-like approach
+            # Use a generous threshold on raw damage to avoid patchy flipping
+            damaged = c_surface[:N] > 0.5
+            flip_mask = back_facing & damaged
+            normals = normals.clone()
+            normals[flip_mask] = -normals[flip_mask]
+
         # Diffuse: N · L
         ndotl = (normals * self.light_dir).sum(dim=-1).clamp(0.0, 1.0)
 
@@ -228,6 +241,7 @@ class GaussianCrackVisualizer:
         preserve_original: bool = True,
         debris_mask: Tensor = None,
         F_per_gaussian: Tensor = None,
+        camera_pos: Tensor = None,
     ):
         """Update Gaussian properties each frame.
 
@@ -239,6 +253,9 @@ class GaussianCrackVisualizer:
             debris_mask:      (N_surf,) bool — small fragment Gaussians to hide
             F_per_gaussian:   (N_surf, 3, 3) deformation gradient per Gaussian
         """
+        # Store camera position for back-face normal flipping
+        self._camera_pos = camera_pos
+
         # Cache original properties once
         if preserve_original and self._original_dc is None:
             self._original_dc = gaussians._features_dc.data.clone()
@@ -262,7 +279,7 @@ class GaussianCrackVisualizer:
             self._apply_deformation_gradient(gaussians, F_per_gaussian)
 
         # Dynamic lighting: recompute shading from rotated normals
-        self._apply_dynamic_lighting(gaussians, F_per_gaussian)
+        self._apply_dynamic_lighting(gaussians, F_per_gaussian, c_surface)
 
         # Debris: mild shrinkage + darkening (keep visible)
         if debris_mask is not None and debris_mask.any():

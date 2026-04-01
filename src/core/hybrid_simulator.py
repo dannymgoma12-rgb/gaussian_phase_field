@@ -1079,6 +1079,14 @@ class HybridCrackSimulator:
         cfl = c_wave * dt / self.mpm.dx if c_wave > 0 else 0
         self._last_cfl = cfl
 
+        # Clamp extreme velocities to prevent particle ejection
+        v_max_limit = 20.0  # max allowed speed in normalized space
+        v_mag = self.v_mpm.norm(dim=1)
+        too_fast = v_mag > v_max_limit
+        if too_fast.any():
+            scale = v_max_limit / v_mag[too_fast].clamp(min=1e-8)
+            self.v_mpm[too_fast] *= scale.unsqueeze(-1)
+
         # Diagnostics
         step = self._physics_step
         if step < 50 or step % 10 == 0:
@@ -1354,7 +1362,8 @@ class HybridCrackSimulator:
             self.gaussians, c_ply, x_ply_world,
             preserve_original=True,
             debris_mask=debris_mask,
-            F_per_gaussian=F_ply)
+            F_per_gaussian=F_ply,
+            camera_pos=getattr(self, '_camera_pos', None))
 
         self._save_diagnostics_if_needed()
 

@@ -860,6 +860,9 @@ def run_simulation(config: OmegaConf, simulator, camera, args):
     log_file = Path(config.output.statistics_log)
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
+    # Pass camera position to simulator for back-face normal flipping
+    simulator._camera_pos = camera.camera_center
+
     # Simulation loop
     render_interval = 1  # Render every frame for debugging
     print(f"\nSimulating {config.rendering.total_frames} frames (render every {render_interval})...")
@@ -1009,14 +1012,12 @@ def run_simulation(config: OmegaConf, simulator, camera, args):
             print(f"  - Depth shape: {depth.shape}")
             print(f"  - Depth range: [{depth.min().item():.3f}, {depth.max().item():.3f}]")
             print(f"  - Depth non-zero pixels: {(depth > 0).sum().item()} / {depth.numel()}")
-            if normal is not None:
-                print(f"  - Normal shape: {normal.shape}")
-                print(f"  - Normal range: [{normal.min().item():.3f}, {normal.max().item():.3f}]")
-                print(f"  - Normal non-zero pixels: {(normal.abs() > 0.01).sum().item()} / {normal.numel()}")
-                # Check mean normal per channel
-                print(f"  - Normal mean (XYZ): [{normal[0].mean().item():.3f}, {normal[1].mean().item():.3f}, {normal[2].mean().item():.3f}]")
-            else:
-                print(f"  - Normal: None (not returned by rasterizer)")
+            if object_mask.sum() > 0:
+                n = normal_from_depth
+                print(f"  - Normal shape: {n.shape}")
+                print(f"  - Normal range: [{n.min().item():.3f}, {n.max().item():.3f}]")
+                print(f"  - Normal non-zero pixels: {(n.abs() > 0.01).sum().item()} / {n.numel()}")
+                print(f"  - Normal mean (XYZ): [{n[0].mean().item():.3f}, {n[1].mean().item():.3f}, {n[2].mean().item():.3f}]")
             print(f"\n[Gaussian Rendering Statistics]")
             print(f"  - Total Gaussians: {n_total}")
             print(f"  - Rendered (radii > 0): {n_rendered} ({render_percent:.1f}%)")
@@ -1350,11 +1351,12 @@ def main():
             surface_mask, device, loading_params=loading_params
         )
 
-        # Pass initial surface normals for dynamic lighting
-        if surface_pcd.normals is not None:
-            surf_normals = torch.from_numpy(
-                np.asarray(surface_pcd.normals)).float().to(device)
-            simulator.visualizer.set_initial_normals(surf_normals)
+        # Pass ALL particle normals (surface + volume) for dynamic lighting
+        # Surface: mesh normals, Volume: radial from centroid
+        if volume_pcd.normals is not None:
+            all_normals = torch.from_numpy(
+                np.asarray(volume_pcd.normals)).float().to(device)
+            simulator.visualizer.set_initial_normals(all_normals)
 
         # Initialize simulation
         simulator.initialize(torch.from_numpy(volume_pcd.points).float().to(device))
