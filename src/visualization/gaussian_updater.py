@@ -207,18 +207,13 @@ class GaussianCrackVisualizer:
             normals = torch.bmm(R_mat, normals.unsqueeze(-1)).squeeze(-1)
             normals = torch.nn.functional.normalize(normals, dim=-1)
 
-        # Flip back-facing normals ONLY for damaged regions (crack interiors)
-        # Use smoothed damage to avoid per-Gaussian flickering
-        if hasattr(self, '_camera_pos') and self._camera_pos is not None and c_surface is not None:
+        # Flip all back-facing normals toward camera (two-sided lighting)
+        if hasattr(self, '_camera_pos') and self._camera_pos is not None:
             view_dir = self._camera_pos.unsqueeze(0) - gaussians._xyz.data[:N]
             view_dir = torch.nn.functional.normalize(view_dir, dim=-1)
             back_facing = (normals * view_dir).sum(dim=-1) < 0
-            # Smooth damage: max of self and neighbors via dilation-like approach
-            # Use a generous threshold on raw damage to avoid patchy flipping
-            damaged = c_surface[:N] > 0.5
-            flip_mask = back_facing & damaged
             normals = normals.clone()
-            normals[flip_mask] = -normals[flip_mask]
+            normals[back_facing] = -normals[back_facing]
 
         # Diffuse: N · L
         ndotl = (normals * self.light_dir).sum(dim=-1).clamp(0.0, 1.0)
@@ -290,4 +285,5 @@ class GaussianCrackVisualizer:
         has_damage = (c_surface is not None
                       and c_surface.max() > self.damage_threshold)
         if has_damage:
-            self._apply_damage_visualization(gaussians, c_surface)
+            # Damage visualization disabled: cracks shown via geometry (fragment separation)
+            pass

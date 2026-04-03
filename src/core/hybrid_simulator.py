@@ -1080,7 +1080,7 @@ class HybridCrackSimulator:
         self._last_cfl = cfl
 
         # Clamp extreme velocities to prevent particle ejection
-        v_max_limit = 20.0  # max allowed speed in normalized space
+        v_max_limit = 10.0  # max allowed speed in normalized space
         v_mag = self.v_mpm.norm(dim=1)
         too_fast = v_mag > v_max_limit
         if too_fast.any():
