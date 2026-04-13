@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+
+# Output (don't bake into image)
+output/
+*.mp4
+*.avi
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Logs
+*.log
+logs/
+
+# Large files
+*.ply
+*.pth
+*.pkl

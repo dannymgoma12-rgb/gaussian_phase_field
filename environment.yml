@@ -1,32 +1,32 @@
 name: crack_py11
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
   - defaults
 dependencies:
   - python=3.11
   - cmake>=3.20
-  - cuda-toolkit=12.8
   - h5py=3.10.0
   - matplotlib
   - ninja
   - numpy=1.24.1
-  - opencv=4.8.1
   - pillow=10.2.0
-  - pip=24.0
+  - pip>=24.0
   - plyfile=1.0.3
   - pybind11>=2.11
-  - pytorch=2.5.1
   - pyyaml
   - scikit-learn
   - scipy=1.12.0
   - setuptools=68.0.0
-  - torchaudio=2.5.1
-  - torchvision=0.20.1
   - tqdm=4.66.1
-  - vs2022_win-64
   - pip:
+    # PyTorch CPU-only (safe default for WSL without GPU)
+    # If you have an NVIDIA GPU, replace "cpu" with "cu128" in the URLs below
+    - torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+    - torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+    - torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+    # OpenCV via pip (avoids conda libjpeg conflicts)
+    - opencv-python==4.8.1.78
+    # Other packages
     - open3d==0.18.0
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -34,12 +34,15 @@ dependencies:
 # ═══════════════════════════════════════════════════════════════════════════
 # After creating this environment, complete the setup with:
 #
-# 1️⃣  Install PyTorch with CUDA 12.8 support:
-#     pip install torch==2.8.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128    
+# ⚠️  GPU NOTE: If you have an NVIDIA GPU in WSL, replace "cpu" with "cu128"
+#     in the three torch pip URLs above before creating the environment.
 #
-# 2️⃣  Install FAISS for GPU-accelerated similarity search:
-#     conda install -c conda-forge faiss-gpu
+# 1️⃣  Verify PyTorch installed correctly:
+#     python -c "import torch; print(torch.__version__)"
 #
+# 2️⃣  Install FAISS:
+#     conda install -c conda-forge faiss-cpu
+#     (or faiss-gpu if you have a GPU and CUDA set up in WSL)
 #
 # 3️⃣  Install Gaussian Splatting submodules (editable mode):
 #     pip install -e gaussian-splatting/submodules/diff-gaussian-rasterization

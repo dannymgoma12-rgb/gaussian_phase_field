@@ -1,0 +1,55 @@
+version: "3.9"
+
+# ============================================================
+# Gaussian Phase Field Crack Simulation
+# Usage:
+#   GPU:  docker compose --profile gpu up
+#   CPU:  docker compose --profile cpu up
+# ============================================================
+
+x-common: &common
+  image: crack-simulation:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+  volumes:
+    - ./output:/app/output        # simulation output
+    - ./assets:/app/assets        # meshes
+    - ./configs:/app/configs      # config files
+  environment:
+    - PYTHONUNBUFFERED=1
+
+services:
+
+  # ── GPU service ───────────────────────────────────────────
+  crack-gpu:
+    <<: *common
+    profiles: [gpu]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DEVICE=cuda
+    command: run --config configs/simulation_config.yaml
+
+  # ── CPU service ───────────────────────────────────────────
+  crack-cpu:
+    <<: *common
+    profiles: [cpu]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DEVICE=cpu
+    command: run --config configs/simulation_config.yaml --device cpu
+
+  # ── Interactive shell ─────────────────────────────────────
+  crack-shell:
+    <<: *common
+    profiles: [shell]
+    stdin_open: true
+    tty: true
+    entrypoint: /bin/bash

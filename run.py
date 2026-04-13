@@ -1011,6 +1011,7 @@ def run_simulation(config: OmegaConf, simulator, camera, args):
             print(f"  - Image range: [{image.min().item():.3f}, {image.max().item():.3f}]")
             print(f"  - Depth shape: {depth.shape}")
             print(f"  - Depth range: [{depth.min().item():.3f}, {depth.max().item():.3f}]")
+            normal = None
             print(f"  - Depth non-zero pixels: {(depth > 0).sum().item()} / {depth.numel()}")
             if object_mask.sum() > 0:
                 n = normal_from_depth

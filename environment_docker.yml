@@ -1,0 +1,31 @@
+name: crack_py11
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - cmake>=3.20
+  - h5py=3.10.0
+  - matplotlib
+  - ninja
+  - numpy=1.26.4
+  - pillow
+  - pip>=24.0
+  - plyfile=1.0.3
+  - pybind11>=2.11
+  - pyyaml
+  - scikit-learn
+  - scipy=1.12.0
+  - setuptools=68.0.0
+  - tqdm=4.66.1
+  - ffmpeg
+  - faiss-gpu
+  - pip:
+    - torch==2.5.1+cu124 --index-url https://download.pytorch.org/whl/cu124
+    - torchvision==0.20.1+cu124 --index-url https://download.pytorch.org/whl/cu124
+    - torchaudio==2.5.1+cu124 --index-url https://download.pytorch.org/whl/cu124
+    - opencv-python==4.8.1.78
+    - open3d==0.18.0
+    - omegaconf

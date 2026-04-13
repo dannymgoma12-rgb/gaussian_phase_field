@@ -1,0 +1,34 @@
+{
+  "description": "Example batch run configuration",
+  "runs": [
+    {
+      "name": "bunny_low_res",
+      "config": "configs/simulation_config.yaml",
+      "mesh": "assets/meshes/bunny.obj",
+      "particles": 10000,
+      "frames": 50,
+      "output": "output/batch/bunny_low_res",
+      "device": "auto"
+    },
+    {
+      "name": "bunny_high_res",
+      "config": "configs/simulation_config.yaml",
+      "mesh": "assets/meshes/bunny.obj",
+      "particles": 50000,
+      "frames": 100,
+      "output": "output/batch/bunny_high_res",
+      "device": "auto"
+    },
+    {
+      "name": "bunny_quick_preview",
+      "config": "configs/simulation_config.yaml",
+      "mesh": "assets/meshes/bunny.obj",
+      "particles": 5000,
+      "frames": 20,
+      "render_every": 5,
+      "output": "output/batch/bunny_preview",
+      "no_video": false,
+      "device": "auto"
+    }
+  ]
+}
