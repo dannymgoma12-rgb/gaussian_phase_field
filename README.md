@@ -451,8 +451,8 @@ If you use this project in academic work, please cite:
 ```bibtex
 @misc{gaussian_phase_field,
   title  = {Gaussian Phase Field Crack Simulation},
-  author = {Danny Gomez},
-  year   = {2025},
+  author = {Daniel Daniel},
+  year   = {2026},
   url    = {https://github.com/dannymgoma12-rgb/gaussian_phase_field}
 }
 ```
