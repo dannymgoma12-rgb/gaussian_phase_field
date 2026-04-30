@@ -29,3 +29,12 @@ dependencies:
     - opencv-python==4.8.1.78
     - open3d==0.18.0
     - omegaconf
+    - scipy==1.12.0
+    - plyfile==1.0.3
+    - tqdm==4.66.1
+    - h5py==3.10.0
+    - pyquaternion
+    - plotly
+    - dash
+    - pandas
+    - configargparse
