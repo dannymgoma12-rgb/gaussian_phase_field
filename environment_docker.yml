@@ -29,8 +29,6 @@ dependencies:
     - opencv-python==4.8.1.78
     - open3d==0.18.0
     - omegaconf
-    - tqdm==4.66.1
-    - h5py==3.10.0
     - pyquaternion
     - plotly
     - dash
